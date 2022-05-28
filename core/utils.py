@@ -1,47 +1,59 @@
+from .constants import EMBED_FOOTER_TEXT
 from socket import socket
-from time import sleep
 from json import dumps as json_dumps
-from os import name as os_name
+from base64 import b64encode
 
 ssl_context = __import__("ssl").create_default_context()
 
-if os_name == "nt":
-    set_title = __import__("ctypes").windll.kernel32.SetConsoleTitleW
+def parse_proxy_string(proxy_str):
+    proxy_str = proxy_str.rpartition("://")[2]
+    auth, _, fields = proxy_str.rpartition("@")
+    fields = fields.split(":", 2)
+
+    if len(fields) == 2:
+        hostname, port = fields
+        if auth:
+            auth = "Basic " + b64encode(auth.encode()).decode()
+    elif len(fields) == 3:
+        hostname, port, auth = fields
+        auth = "Basic " + b64encode(auth.encode()).decode()
+    else:
+        raise Exception(f"Unrecognized proxy format: {proxy_str}")
+
+    addr = (hostname.lower(), int(port))
+    return auth, addr
 
 def parse_batch_response(data, limit):
     index = 10
-    status = {}
+    status_assoc = {}
     for _ in range(limit):
         id_index = data.find(b'"id":', index)
         if id_index == -1:
             break
-        index = data.find(b',', id_index + 5)
+        index = data.find(b",", id_index + 5)
         group_id = data[id_index + 5 : index]
         index = data.find(b'"owner":', index) + 8
-        status[group_id] = (data[index] == 123)
+        status_assoc[group_id] = (data[index] == 123)
         index += 25
-    return status
+    return status_assoc
 
 def find_latest_group_id():
-    gid = 0
+    group_id = 0
     sock = make_http_socket(("www.roblox.com", 443))
 
     def exists(group_id):
         sock.send(f"GET /groups/{group_id}/- HTTP/1.1\nHost:www.roblox.com\n\n".encode())
         resp = sock.recv(1048576)
         return not b"location: https://www.roblox.com/search/groups?keyword=" in resp
-    
-    try:
-        for l in range(8, 0, -1):
-            num = int("1" + ("0" * (l - 1)))
-            for inc in range(1, 10):
-                if inc == 9 or not exists(gid + (num * inc)):
-                    gid += num * (inc - 1)
-                    break
-        return gid
-        
-    finally:
-        shutdown_socket(sock)
+
+    for l in range(8, 0, -1):
+        num = int("1" + ("0" * (l - 1)))
+        for inc in range(1, 10):
+            if inc == 9 or not exists(group_id + (num * inc)):
+                group_id += num * (inc - 1)
+                break
+
+    return group_id
 
 def send_webhook(url, **kwargs):
     payload = json_dumps(kwargs, separators=(",", ":"))
@@ -52,6 +64,7 @@ def send_webhook(url, **kwargs):
         port = int(port)
     else:
         port = 443 if https else 80
+
     sock = make_http_socket((hostname, port), ssl_wrap=https)
     try:
         sock.send(
@@ -66,21 +79,18 @@ def send_webhook(url, **kwargs):
         shutdown_socket(sock)
 
 def make_embed(group_info, date):
+    id = group_info["id"]
+    name = group_info["name"]
+    memberCount = group_info["memberCount"]
     return dict(
-        title="New Claimable Group!",
-        url=f"https://www.roblox.com/groups/{group_info['id']}",
-        fields=[
-            dict(name="Group ID", value=group_info["id"]),
-            dict(name="Group Name", value=group_info["name"]),
-            dict(name="Group Members", value=group_info["memberCount"])
-        ],
+        title="Found Group!",
+        description=f"**ID**: `{id}`\n**Name**: `{name}`\n**Members**: `{memberCount}`\n\n**Link**: https://www.roblox.com/groups/{id}",
         footer=dict(
-            text="Finder By Ayesha and Moo"
-        ),
-        timestamp=date.isoformat()
+            text=EMBED_FOOTER_TEXT
+        )
     )
 
-def make_http_socket(addr, timeout=5, proxy_addr=None,
+def make_http_socket(addr, timeout=5, proxy_addr=None, proxy_headers=None,
                      ssl_wrap=True, hostname=None):    
     sock = socket()
     sock.settimeout(timeout)
@@ -88,7 +98,14 @@ def make_http_socket(addr, timeout=5, proxy_addr=None,
     
     try:
         if proxy_addr:
-            sock.send(f"CONNECT {addr[0]}:{addr[1]} HTTP/1.1\r\n\r\n".encode())
+            sock.send("".join([
+                f"CONNECT {addr[0]}:{addr[1]} HTTP/1.1\r\n",
+                *([
+                    f"{header}: {value}\r\n"
+                    for header, value in proxy_headers.items()
+                ] if proxy_headers else []),
+                "\r\n"
+            ]).encode())
             connect_resp = sock.recv(4096)
             if not (
                 connect_resp.startswith(b"HTTP/1.1 200") or\
@@ -125,9 +142,3 @@ def slice_range(r, num, total):
         r[0] + (num * per),
         r[0] + ((num + 1) * per)
     )
-
-def update_stats(text):
-    if os_name == "nt":
-        set_title(f"Group Finder | {text}")
-    else:
-        print(text)
